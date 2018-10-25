@@ -31,8 +31,6 @@ import (
 )
 
 var (
-	responseHeaderTimeout = time.Duration(30) * time.Second
-
 	ErrRouterConfigConflict = errors.New("router config conflict")
 	ErrNoDomain             = errors.New("no such domain")
 )
@@ -47,31 +45,45 @@ func getHostFromAddr(addr string) (host string) {
 	return
 }
 
+type HttpReverseProxyOptions struct {
+	ResponseHeaderTimeoutS int64
+}
+
 type HttpReverseProxy struct {
 	proxy *ReverseProxy
 
 	vhostRouter *VhostRouters
 
-	cfgMu sync.RWMutex
+	responseHeaderTimeout time.Duration
+	cfgMu                 sync.RWMutex
 }
 
-func NewHttpReverseProxy() *HttpReverseProxy {
+func NewHttpReverseProxy(option HttpReverseProxyOptions) *HttpReverseProxy {
+	if option.ResponseHeaderTimeoutS <= 0 {
+		option.ResponseHeaderTimeoutS = 60
+	}
 	rp := &HttpReverseProxy{
-		vhostRouter: NewVhostRouters(),
+		responseHeaderTimeout: time.Duration(option.ResponseHeaderTimeoutS) * time.Second,
+		vhostRouter:           NewVhostRouters(),
 	}
 	proxy := &ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			url := req.Context().Value("url").(string)
-			host := getHostFromAddr(req.Context().Value("host").(string))
-			host = rp.GetRealHost(host, url)
+			oldHost := getHostFromAddr(req.Context().Value("host").(string))
+			host := rp.GetRealHost(oldHost, url)
 			if host != "" {
 				req.Host = host
 			}
 			req.URL.Host = req.Host
+
+			headers := rp.GetHeaders(oldHost, url)
+			for k, v := range headers {
+				req.Header.Set(k, v)
+			}
 		},
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: responseHeaderTimeout,
+			ResponseHeaderTimeout: rp.responseHeaderTimeout,
 			DisableKeepAlives:     true,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				url := ctx.Value("url").(string)
@@ -113,6 +125,14 @@ func (rp *HttpReverseProxy) GetRealHost(domain string, location string) (host st
 	vr, ok := rp.getVhost(domain, location)
 	if ok {
 		host = vr.payload.(*VhostRouteConfig).RewriteHost
+	}
+	return
+}
+
+func (rp *HttpReverseProxy) GetHeaders(domain string, location string) (headers map[string]string) {
+	vr, ok := rp.getVhost(domain, location)
+	if ok {
+		headers = vr.payload.(*VhostRouteConfig).Headers
 	}
 	return
 }
